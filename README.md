@@ -1,19 +1,17 @@
 <p align="center">
-  <img src="./docs/logo.png" alt="Hivemind logo" width="200" />
+  <img src="./docs/hivemind-logo.png" alt="Hivemind logo" width="200" />
 </p>
 
 <h1 align="center">Hivemind</h1>
 
 <p align="center">
-
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
-[![Version](https://img.shields.io/badge/version-0.1.0-green.svg)](./package.json)
-[![Runtime: Bun](https://img.shields.io/badge/runtime-Bun-fbf0df.svg)](https://bun.sh)
-[![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6.svg)](./tsconfig.json)
-[![MCP](https://img.shields.io/badge/MCP-1.29-9146FF.svg)](https://modelcontextprotocol.io)
-[![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-D97757.svg)](https://docs.anthropic.com/claude-code)
-[![Codex](https://img.shields.io/badge/Codex-app--server-10A37F.svg)](https://github.com/openai/codex)
-
+  <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-blue.svg" /></a>
+  <a href="./package.json"><img alt="Version" src="https://img.shields.io/badge/version-0.1.0-green.svg" /></a>
+  <a href="https://bun.sh"><img alt="Runtime: Bun" src="https://img.shields.io/badge/runtime-Bun-fbf0df.svg" /></a>
+  <a href="./tsconfig.json"><img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-strict-3178C6.svg" /></a>
+  <a href="https://modelcontextprotocol.io"><img alt="MCP" src="https://img.shields.io/badge/MCP-1.29-9146FF.svg" /></a>
+  <a href="https://docs.anthropic.com/claude-code"><img alt="Claude Code" src="https://img.shields.io/badge/Claude%20Code-plugin-D97757.svg" /></a>
+  <a href="https://github.com/openai/codex"><img alt="Codex" src="https://img.shields.io/badge/Codex-app--server-10A37F.svg" /></a>
 </p>
 
 Bridge [Claude Code](https://docs.anthropic.com/claude-code) and [Codex](https://github.com/openai/codex) on the same machine. Ask Codex for a second opinion, brainstorm across both models, or call Codex directly from Claude — all without copy/pasting.
