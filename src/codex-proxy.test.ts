@@ -171,8 +171,8 @@ describe("injectMessage gates", () => {
 describe("agentMessage extraction", () => {
   test("emits agentMessage from item.content when present", () => {
     const proxy = makeProxy();
-    const captured: HivemindMessage[] = [];
-    proxy.on("agentMessage", (m) => captured.push(m));
+    const captured: { msg: HivemindMessage; fromBridge: boolean }[] = [];
+    proxy.on("agentMessage", (m, meta) => captured.push({ msg: m, fromBridge: meta.fromBridge }));
 
     proxy.handleAppServerPayload(JSON.stringify({
       method: "item/completed",
@@ -186,9 +186,11 @@ describe("agentMessage extraction", () => {
     }));
 
     expect(captured.length).toBe(1);
-    expect(captured[0]!.content).toBe("Hello world");
-    expect(captured[0]!.source).toBe("codex");
-    expect(captured[0]!.id).toBe("i1");
+    expect(captured[0]!.msg.content).toBe("Hello world");
+    expect(captured[0]!.msg.source).toBe("codex");
+    expect(captured[0]!.msg.id).toBe("i1");
+    // No bridge inject happened, so this is a non-bridge (TUI) message.
+    expect(captured[0]!.fromBridge).toBe(false);
   });
 
   test("falls back to the delta buffer when item.content is empty", () => {
@@ -237,9 +239,9 @@ describe("turn lifecycle", () => {
   test("turn/started and turn/completed toggle turnInProgress", () => {
     const proxy = makeProxy();
     let started = 0;
-    let completed = 0;
+    const completedEvents: { fromBridge: boolean; turnId: string | null }[] = [];
     proxy.on("turnStarted", () => started++);
-    proxy.on("turnCompleted", () => completed++);
+    proxy.on("turnCompleted", (meta) => completedEvents.push(meta));
 
     expect(proxy.turnInProgress).toBe(false);
 
@@ -255,6 +257,134 @@ describe("turn lifecycle", () => {
       params: { turn: { id: "tn1" } },
     }));
     expect(proxy.turnInProgress).toBe(false);
-    expect(completed).toBe(1);
+    expect(completedEvents).toEqual([{ fromBridge: false, turnId: "tn1" }]);
+  });
+});
+
+// ── 7. Bridge turn correlation ───────────────────────────
+
+describe("bridge turn correlation", () => {
+  test("agentMessage during a bridge-originated turn is fromBridge=true", () => {
+    const proxy = makeProxy();
+    proxy.threadId = "t1";
+    attachFakeAppServer(proxy);
+
+    const captured: { fromBridge: boolean; content: string }[] = [];
+    proxy.on("agentMessage", (m, meta) =>
+      captured.push({ fromBridge: meta.fromBridge, content: m.content }),
+    );
+
+    expect(proxy.injectMessage("hi").ok).toBe(true);
+    proxy.handleAppServerPayload(JSON.stringify({ id: -1, result: {} }));
+    proxy.handleAppServerPayload(JSON.stringify({
+      method: "turn/started",
+      params: { turn: { id: "tn-bridge" } },
+    }));
+    proxy.handleAppServerPayload(JSON.stringify({
+      method: "item/completed",
+      params: {
+        item: {
+          id: "i1",
+          type: "agentMessage",
+          content: [{ type: "text", text: "hi back" }],
+        },
+      },
+    }));
+
+    expect(captured).toEqual([{ fromBridge: true, content: "hi back" }]);
+  });
+
+  test("agentMessage during a TUI-originated turn is fromBridge=false", () => {
+    const proxy = makeProxy();
+    proxy.threadId = "t1";
+    attachFakeAppServer(proxy);
+
+    const captured: { fromBridge: boolean }[] = [];
+    proxy.on("agentMessage", (_m, meta) => captured.push({ fromBridge: meta.fromBridge }));
+
+    proxy.handleAppServerPayload(JSON.stringify({
+      method: "turn/started",
+      params: { turn: { id: "tn-tui" } },
+    }));
+    proxy.handleAppServerPayload(JSON.stringify({
+      method: "item/completed",
+      params: {
+        item: {
+          id: "i2",
+          type: "agentMessage",
+          content: [{ type: "text", text: "from tui" }],
+        },
+      },
+    }));
+
+    expect(captured).toEqual([{ fromBridge: false }]);
+  });
+
+  test("turnCompleted reports fromBridge correctly for both turn origins", () => {
+    const proxy = makeProxy();
+    proxy.threadId = "t1";
+    attachFakeAppServer(proxy);
+
+    const events: { fromBridge: boolean; turnId: string | null }[] = [];
+    proxy.on("turnCompleted", (meta) => events.push(meta));
+
+    // TUI turn first.
+    proxy.handleAppServerPayload(JSON.stringify({
+      method: "turn/started",
+      params: { turn: { id: "tn-tui" } },
+    }));
+    proxy.handleAppServerPayload(JSON.stringify({
+      method: "turn/completed",
+      params: { turn: { id: "tn-tui" } },
+    }));
+
+    // Then a bridge inject.
+    proxy.injectMessage("hi");
+    proxy.handleAppServerPayload(JSON.stringify({ id: -1, result: {} }));
+    proxy.handleAppServerPayload(JSON.stringify({
+      method: "turn/started",
+      params: { turn: { id: "tn-bridge" } },
+    }));
+    proxy.handleAppServerPayload(JSON.stringify({
+      method: "turn/completed",
+      params: { turn: { id: "tn-bridge" } },
+    }));
+
+    expect(events).toEqual([
+      { fromBridge: false, turnId: "tn-tui" },
+      { fromBridge: true, turnId: "tn-bridge" },
+    ]);
+  });
+});
+
+// ── 8. Fire-and-forget reservation ───────────────────────
+
+describe("fire-and-forget reservation", () => {
+  test("second injectMessage is blocked while a bridge request is in flight", () => {
+    const proxy = makeProxy();
+    proxy.threadId = "t1";
+    attachFakeAppServer(proxy);
+
+    const first = proxy.injectMessage("first");
+    expect(first.ok).toBe(true);
+
+    // bridgeRequestIds still contains -1, so the gate must reject.
+    const second = proxy.injectMessage("second");
+    expect(second.ok).toBe(false);
+    expect(second.errorCode).toBe("TURN_BUSY");
+  });
+
+  test("a fresh inject succeeds once the bridge response has been consumed", () => {
+    const proxy = makeProxy();
+    proxy.threadId = "t1";
+    const fake = attachFakeAppServer(proxy);
+
+    proxy.injectMessage("first");
+    proxy.handleAppServerPayload(JSON.stringify({ id: -1, result: {} }));
+
+    // Bridge id consumed and turn/started not yet fired — gate is open again.
+    const second = proxy.injectMessage("second");
+    expect(second.ok).toBe(true);
+    expect(fake.sent).toHaveLength(2);
   });
 });

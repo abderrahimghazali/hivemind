@@ -59,16 +59,19 @@ let activeWaiter: ActiveWaiter | null = null;
 
 // ── Proxy event wiring ────────────────────────────────────
 
-proxy.on("agentMessage", (msg) => {
-  if (activeWaiter) {
+proxy.on("agentMessage", (msg, meta) => {
+  // Only collect into the waiter if this message belongs to the turn the
+  // bridge actually injected. TUI-originated agentMessages still get
+  // enqueued so wait_for_codex / get_messages can drain them.
+  if (activeWaiter && meta.fromBridge) {
     activeWaiter.parts.push(msg.content);
     return;
   }
   enqueueAndPush(msg);
 });
 
-proxy.on("turnCompleted", () => {
-  if (!activeWaiter) return;
+proxy.on("turnCompleted", (meta) => {
+  if (!activeWaiter || !meta.fromBridge) return;
   const w = activeWaiter;
   activeWaiter = null;
   clearTimeout(w.timer);
@@ -175,6 +178,16 @@ function handleAskCodex(
   ws: ServerWebSocket<ControlSocketData>,
   msg: Extract<ControlClientMessage, { type: "ask_codex" }>,
 ) {
+  const waitMs = msg.waitMs ?? 0;
+  if (activeWaiter) {
+    resolveAsk(ws, msg.requestId, {
+      ok: false,
+      error: "Another wait is currently active",
+      errorCode: "TURN_BUSY",
+    });
+    return;
+  }
+
   const result = proxy.injectMessage(withContract(msg.text));
   if (!result.ok) {
     resolveAsk(ws, msg.requestId, {
@@ -186,19 +199,8 @@ function handleAskCodex(
   }
   log(`ask_codex sent (requestId=${msg.requestId}, waitMs=${msg.waitMs ?? 0})`);
 
-  const waitMs = msg.waitMs ?? 0;
   if (waitMs <= 0) {
     resolveAsk(ws, msg.requestId, { ok: true, reply: "", parts: [], timedOut: false });
-    return;
-  }
-
-  if (activeWaiter) {
-    // Defensive — proxy.turnInProgress should have rejected the second injection.
-    resolveAsk(ws, msg.requestId, {
-      ok: false,
-      error: "Another wait is currently active",
-      errorCode: "TURN_BUSY",
-    });
     return;
   }
 
@@ -231,7 +233,12 @@ function resolveAsk(
 function attachBridge(ws: ServerWebSocket<ControlSocketData>) {
   if (attachedBridge && attachedBridge !== ws && attachedBridge.readyState !== WebSocket.CLOSED) {
     log(`Replacing previous bridge (#${attachedBridge.data.clientId}) with #${ws.data.clientId}`);
-    try { attachedBridge.close(CLOSE_CODE_REPLACED, "replaced by newer bridge"); } catch {}
+    const previous = attachedBridge;
+    // Detach before rehoming so any orphan parts queue for the new bridge
+    // instead of being sent to the socket we're about to close.
+    attachedBridge = null;
+    rehomeWaiterForBridge(previous);
+    try { previous.close(CLOSE_CODE_REPLACED, "replaced by newer bridge"); } catch {}
   }
   attachedBridge = ws;
   ws.data.attached = true;
@@ -251,7 +258,31 @@ function detachBridge(ws: ServerWebSocket<ControlSocketData>) {
   attachedBridge = null;
   ws.data.attached = false;
   log(`Bridge detached (#${ws.data.clientId})`);
+  rehomeWaiterForBridge(ws);
   scheduleIdleShutdown();
+}
+
+function rehomeWaiterForBridge(ws: ServerWebSocket<ControlSocketData>) {
+  // If a turn-waiter belongs to this socket, rehome it: dump collected parts
+  // into the queue and clear the waiter so future agentMessages flow normally.
+  // Otherwise the reply gets sent to a dead socket and is silently lost.
+  if (activeWaiter && activeWaiter.ws === ws) {
+    const w = activeWaiter;
+    activeWaiter = null;
+    clearTimeout(w.timer);
+    if (w.parts.length) {
+      const combined = w.parts.join("\n\n");
+      log(`Bridge dropped mid-wait — re-queueing ${w.parts.length} collected part(s) (${combined.length} chars)`);
+      enqueueAndPush({
+        id: `codex_orphan_${Date.now()}`,
+        source: "codex",
+        content: combined,
+        ts: Date.now(),
+      });
+    } else {
+      log("Bridge dropped mid-wait — no parts collected yet, future agentMessages will queue");
+    }
+  }
 }
 
 // ── Message queue + push ─────────────────────────────────
@@ -328,26 +359,27 @@ async function boot() {
   log(`Codex proxy:      ws://127.0.0.1:${PROXY_PORT}`);
   log(`Control:          ws://127.0.0.1:${CONTROL_PORT}/ws`);
 
-  lifecycle.writePid();
-  lifecycle.writeStatus({
-    appServerUrl: proxy.appServerUrl,
-    proxyUrl: proxy.proxyUrl,
-    controlPort: CONTROL_PORT,
-    pid: process.pid,
-  });
-
-  startControlServer();
-
   try {
+    startControlServer();
+    // Write pid/status only after the control server is listening, so a
+    // Bun.serve failure on the control port doesn't leave stale state files.
+    lifecycle.writePid();
+    lifecycle.writeStatus({
+      appServerUrl: proxy.appServerUrl,
+      proxyUrl: proxy.proxyUrl,
+      controlPort: CONTROL_PORT,
+      pid: process.pid,
+    });
     await proxy.start();
     proxyReady = true;
     log("Daemon healthy: control + proxy listening");
   } catch (err: any) {
-    log(`Failed to start Codex proxy: ${err.message}`);
+    log(`Failed to boot daemon: ${err.stack ?? err.message}`);
+    shutdown("boot_failed", 1);
   }
 }
 
-function shutdown(reason: string) {
+function shutdown(reason: string, exitCode = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
   log(`Shutting down (${reason})`);
@@ -356,7 +388,7 @@ function shutdown(reason: string) {
   proxy.stop();
   lifecycle.removePidFile();
   lifecycle.removeStatusFile();
-  process.exit(0);
+  process.exit(exitCode);
 }
 
 process.on("SIGINT", () => shutdown("SIGINT"));

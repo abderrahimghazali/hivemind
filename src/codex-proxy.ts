@@ -46,10 +46,20 @@ export interface InjectResult {
   message?: string;
 }
 
+export interface AgentMessageMeta {
+  /** True if this agentMessage belongs to a turn started by the bridge's injectMessage. */
+  fromBridge: boolean;
+}
+
+export interface TurnCompletedMeta {
+  fromBridge: boolean;
+  turnId: string | null;
+}
+
 interface CodexProxyEvents {
-  agentMessage: [HivemindMessage];
+  agentMessage: [HivemindMessage, AgentMessageMeta];
   turnStarted: [];
-  turnCompleted: [];
+  turnCompleted: [TurnCompletedMeta];
   ready: [string];
   tuiConnected: [number];
   tuiDisconnected: [number];
@@ -85,6 +95,8 @@ export class CodexProxy extends EventEmitter<CodexProxyEvents> {
   private proxyServer: ReturnType<typeof Bun.serve> | null = null;
   private connIdCounter = 0;
   private intentionalDisconnect = false;
+  private suppressNextAppServerClose = false;
+  private reconnectingAppServer: Promise<void> | null = null;
 
   private nextProxyId = 100000;
   private nextBridgeId = -1;
@@ -96,6 +108,12 @@ export class CodexProxy extends EventEmitter<CodexProxyEvents> {
   private pendingTracked = new Map<string, PendingTrackedRequest>();
   private agentMessageDeltaBuffers = new Map<string, string[]>();
   private activeTurnIds = new Set<string>();
+
+  // Turn-id correlation for bridge injects. bridgeTurnPending is set when
+  // injectMessage successfully sends; the next turn/started is attributed
+  // to the bridge by capturing its id into bridgeTurnIds.
+  private bridgeTurnPending = false;
+  private bridgeTurnIds = new Set<string>();
 
   constructor(
     private readonly appPort: number,
@@ -171,7 +189,11 @@ export class CodexProxy extends EventEmitter<CodexProxyEvents> {
         message: "Codex app-server is not connected.",
       };
     }
-    if (this.turnInProgress) {
+    if (this.turnInProgress || this.bridgeRequestIds.size > 0) {
+      // Either a TUI/bridge turn is running (turnInProgress) or we sent a
+      // turn/start whose response/turn-started hasn't landed yet. The bridge
+      // id stays in the map until the response arrives or BRIDGE_TTL_MS
+      // elapses, so this also blocks fire-and-forget races.
       return {
         ok: false,
         errorCode: "TURN_BUSY",
@@ -187,6 +209,9 @@ export class CodexProxy extends EventEmitter<CodexProxyEvents> {
     };
     try {
       this.appServerWs.send(JSON.stringify(payload));
+      // Mark the next turn/started as bridge-originated so the daemon waiter
+      // can ignore TUI-originated turns that interleave.
+      this.bridgeTurnPending = true;
       this.log(`Bridge → Codex (id=${id}, ${text.length} chars)`);
       return { ok: true };
     } catch (err: any) {
@@ -235,10 +260,44 @@ export class CodexProxy extends EventEmitter<CodexProxyEvents> {
       };
       ws.onclose = () => {
         this.log("App-server connection closed");
-        this.appServerWs = null;
+        if (this.appServerWs === ws) this.appServerWs = null;
+        if (this.suppressNextAppServerClose) {
+          this.suppressNextAppServerClose = false;
+          return;
+        }
         if (!this.intentionalDisconnect) this.emit("error", new Error("Codex app-server connection lost"));
       };
     });
+  }
+
+  private refreshAppServerConnection(reason: string): void {
+    if (this.intentionalDisconnect || this.reconnectingAppServer) return;
+
+    this.log(`Refreshing Codex app-server connection (${reason})`);
+    this.upstreamToClient.clear();
+    this.serverRequestToProxy.clear();
+    this.pendingTracked.clear();
+    this.agentMessageDeltaBuffers.clear();
+    this.activeTurnIds.clear();
+    this.bridgeTurnIds.clear();
+    this.bridgeTurnPending = false;
+    this.turnInProgress = false;
+
+    const ws = this.appServerWs;
+    this.appServerWs = null;
+    if (ws && ws.readyState !== WebSocket.CLOSED) {
+      this.suppressNextAppServerClose = true;
+      try { ws.close(); } catch {}
+    }
+
+    this.reconnectingAppServer = this.connectAppServer()
+      .catch((err) => {
+        this.log(`Failed to refresh app-server connection: ${err.message}`);
+        this.emit("error", err);
+      })
+      .finally(() => {
+        this.reconnectingAppServer = null;
+      });
   }
 
   // ── TUI proxy server ──────────────────────────────────────
@@ -291,6 +350,8 @@ export class CodexProxy extends EventEmitter<CodexProxyEvents> {
     this.threadId = null;
     this.turnInProgress = false;
     this.activeTurnIds.clear();
+    this.bridgeTurnIds.clear();
+    this.bridgeTurnPending = false;
     this.log(`TUI connected (conn #${connId})`);
     this.emit("tuiConnected", connId);
   }
@@ -306,6 +367,7 @@ export class CodexProxy extends EventEmitter<CodexProxyEvents> {
       this.log(`TUI disconnected (conn #${connId})`);
       this.emit("tuiDisconnected", connId);
       this.retireConnection(connId);
+      this.refreshAppServerConnection(`TUI conn #${connId} disconnected`);
     }
   }
 
@@ -472,16 +534,24 @@ export class CodexProxy extends EventEmitter<CodexProxyEvents> {
           const content = this.extractAgentMessage(item);
           this.agentMessageDeltaBuffers.delete(item.id);
           if (content) {
-            this.log(`Codex agentMessage completed (${content.length} chars)`);
-            this.emit("agentMessage", { id: item.id, source: "codex", content, ts: Date.now() });
+            const fromBridge = this.isItemFromBridgeTurn();
+            this.log(`Codex agentMessage completed (${content.length} chars, fromBridge=${fromBridge})`);
+            this.emit(
+              "agentMessage",
+              { id: item.id, source: "codex", content, ts: Date.now() },
+              { fromBridge },
+            );
           }
         }
         break;
       }
       case "turn/completed": {
         const wasInProgress = this.turnInProgress;
-        this.markTurnCompleted(params?.turn?.id);
-        if (wasInProgress && !this.turnInProgress) this.emit("turnCompleted");
+        const turnId = typeof params?.turn?.id === "string" ? params.turn.id : null;
+        const fromBridge = this.markTurnCompleted(params?.turn?.id);
+        if (wasInProgress && !this.turnInProgress) {
+          this.emit("turnCompleted", { fromBridge, turnId });
+        }
         break;
       }
     }
@@ -542,17 +612,42 @@ export class CodexProxy extends EventEmitter<CodexProxyEvents> {
     const wasInProgress = this.turnInProgress;
     const id = typeof turnId === "string" && turnId ? turnId : `unknown:${Date.now()}`;
     this.activeTurnIds.add(id);
+    if (this.bridgeTurnPending) {
+      this.bridgeTurnIds.add(id);
+      this.bridgeTurnPending = false;
+    }
     this.turnInProgress = this.activeTurnIds.size > 0;
     if (!wasInProgress && this.turnInProgress) this.emit("turnStarted");
   }
 
-  private markTurnCompleted(turnId?: string) {
+  /** Returns true if the completed turn was originated by the bridge. */
+  private markTurnCompleted(turnId?: string): boolean {
+    let fromBridge = false;
     if (typeof turnId === "string" && turnId) {
       this.activeTurnIds.delete(turnId);
+      if (this.bridgeTurnIds.delete(turnId)) fromBridge = true;
     } else {
+      // Defensive: turn/completed without id clears everything we knew about.
+      // If any of the cleared turns were bridge-originated, treat the
+      // completion as bridge so the waiter resolves rather than hanging.
+      fromBridge = this.bridgeTurnIds.size > 0;
       this.activeTurnIds.clear();
+      this.bridgeTurnIds.clear();
     }
     this.turnInProgress = this.activeTurnIds.size > 0;
+    return fromBridge;
+  }
+
+  private isItemFromBridgeTurn(): boolean {
+    // Items don't carry a turn id, so attribute by intersection: an item
+    // belongs to a bridge turn if any active turn is a bridge turn.
+    // In v0.1 codex serializes one turn at a time per thread, so this
+    // is unambiguous in practice.
+    if (this.bridgeTurnIds.size === 0) return false;
+    for (const id of this.activeTurnIds) {
+      if (this.bridgeTurnIds.has(id)) return true;
+    }
+    return false;
   }
 
   // ── ID lifecycle helpers ──────────────────────────────────
@@ -607,35 +702,27 @@ export class CodexProxy extends EventEmitter<CodexProxyEvents> {
 
   private async checkPorts() {
     for (const port of [this.appPort, this.proxyPort]) {
+      let pids: string;
       try {
-        const pids = execSync(`lsof -ti :${port}`, { encoding: "utf-8" }).trim();
-        if (!pids) continue;
-        const list = pids.split("\n").map((p) => p.trim()).filter(Boolean);
-        const stale: string[] = [];
-        const foreign: string[] = [];
-        for (const pid of list) {
-          try {
-            const cmd = execSync(`ps -p ${pid} -o args=`, { encoding: "utf-8" }).trim();
-            if (cmd.includes("codex") && cmd.includes("app-server")) stale.push(pid);
-            else foreign.push(pid);
-          } catch {}
-        }
-        if (stale.length) {
-          this.log(`Cleaning stale codex app-server on :${port}: ${stale.join(", ")}`);
-          for (const pid of stale) {
-            try { execSync(`kill ${pid}`); } catch {}
-          }
-          await new Promise((r) => setTimeout(r, 500));
-        }
-        if (foreign.length) {
-          throw new Error(
-            `Port ${port} is in use by non-Codex process(es): ${foreign.join(", ")}. ` +
-            `Set ${port === this.appPort ? "CODEX_WS_PORT" : "CODEX_PROXY_PORT"} to a different port.`,
-          );
-        }
-      } catch (err: any) {
-        if (err.message?.includes("Port ")) throw err;
+        pids = execSync(`lsof -ti :${port}`, { encoding: "utf-8" }).trim();
+      } catch {
+        continue; // lsof exits non-zero when nothing is listening — that's fine.
       }
+      if (!pids) continue;
+      const list = pids.split("\n").map((p) => p.trim()).filter(Boolean);
+      const occupants: { pid: string; cmd: string }[] = [];
+      for (const pid of list) {
+        let cmd = "<unknown>";
+        try { cmd = execSync(`ps -p ${pid} -o args=`, { encoding: "utf-8" }).trim(); } catch {}
+        occupants.push({ pid, cmd });
+      }
+      const envVar = port === this.appPort ? "CODEX_WS_PORT" : "CODEX_PROXY_PORT";
+      const detail = occupants.map((o) => `  pid ${o.pid}: ${o.cmd}`).join("\n");
+      throw new Error(
+        `Port ${port} is already in use:\n${detail}\n` +
+        `If this is a stale Hivemind, run \`hm kill\` to stop it. ` +
+        `If it's something else, stop that process or set ${envVar} to a free port.`,
+      );
     }
   }
 }

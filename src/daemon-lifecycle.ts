@@ -233,10 +233,12 @@ export class DaemonLifecycle {
 
   private isDaemonProcess(pid: number): boolean {
     try {
-      const cmd = execFileSync("ps", ["-p", String(pid), "-o", "command="], {
+      // -ww disables column truncation, otherwise long install paths get
+      // chopped and the includes check below false-negatives.
+      const cmd = execFileSync("ps", ["-ww", "-p", String(pid), "-o", "command="], {
         encoding: "utf-8",
       }).trim();
-      return cmd.includes("daemon") && cmd.includes("hivemind");
+      return cmd.includes(DAEMON_PATH);
     } catch {
       return false;
     }
