@@ -1,0 +1,19 @@
+{
+  "name": "hivemind",
+  "owner": {
+    "name": "Abderrahim Ghazali",
+    "url": "https://github.com/abderrahimghazali"
+  },
+  "metadata": {
+    "description": "Local marketplace for the Hivemind Claude Code plugin."
+  },
+  "plugins": [
+    {
+      "name": "hivemind",
+      "description": "Bridge Claude Code and Codex for second-opinion and brainstorming via a shared daemon and MCP tools.",
+      "version": "0.1.0",
+      "source": "./plugins/hivemind",
+      "category": "development"
+    }
+  ]
+}

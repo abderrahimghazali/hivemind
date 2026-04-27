@@ -1,0 +1,6 @@
+{
+  "name": "hivemind",
+  "version": "0.1.0",
+  "description": "Bridge Claude Code and Codex for second-opinion and brainstorming workflows.",
+  "license": "MIT"
+}

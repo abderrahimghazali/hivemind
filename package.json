@@ -1,0 +1,52 @@
+{
+  "name": "@abderrahimgazali/hivemind",
+  "version": "0.1.0",
+  "description": "Bridge between Claude Code and Codex for second-opinion and brainstorming workflows",
+  "type": "module",
+  "bin": {
+    "hivemind": "dist/cli.js",
+    "hm": "dist/cli.js"
+  },
+  "files": [
+    "dist/",
+    "plugins/",
+    ".claude-plugin/",
+    "scripts/postinstall.cjs",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build:cli": "mkdir -p dist && bun build src/cli.ts --outfile dist/cli.js --target bun && bun build src/daemon.ts --outfile dist/daemon.js --target bun && chmod +x dist/cli.js",
+    "build:plugin": "mkdir -p plugins/hivemind/server && bun build src/bridge.ts --outfile plugins/hivemind/server/bridge.js --target bun && bun build src/daemon.ts --outfile plugins/hivemind/server/daemon.js --target bun",
+    "build": "bun run build:cli && bun run build:plugin",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test src",
+    "check": "bun run typecheck && bun run test",
+    "postinstall": "node scripts/postinstall.cjs"
+  },
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "codex",
+    "mcp",
+    "model-context-protocol",
+    "ai-agents",
+    "ai-collaboration",
+    "second-opinion",
+    "brainstorm",
+    "bun",
+    "typescript"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/abderrahimghazali/hivemind.git"
+  },
+  "homepage": "https://github.com/abderrahimghazali/hivemind#readme",
+  "bugs": {
+    "url": "https://github.com/abderrahimghazali/hivemind/issues"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "@types/bun": "^1.3.11",
+    "typescript": "^5.8.0"
+  }
+}
