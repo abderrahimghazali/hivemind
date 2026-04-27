@@ -1,4 +1,10 @@
-# Hivemind
+<p align="center">
+  <img src="./docs/logo.png" alt="Hivemind logo" width="200" />
+</p>
+
+<h1 align="center">Hivemind</h1>
+
+<p align="center">
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Version](https://img.shields.io/badge/version-0.1.0-green.svg)](./package.json)
@@ -7,6 +13,8 @@
 [![MCP](https://img.shields.io/badge/MCP-1.29-9146FF.svg)](https://modelcontextprotocol.io)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-D97757.svg)](https://docs.anthropic.com/claude-code)
 [![Codex](https://img.shields.io/badge/Codex-app--server-10A37F.svg)](https://github.com/openai/codex)
+
+</p>
 
 Bridge [Claude Code](https://docs.anthropic.com/claude-code) and [Codex](https://github.com/openai/codex) on the same machine. Ask Codex for a second opinion, brainstorm across both models, or call Codex directly from Claude — all without copy/pasting.
 
